@@ -1,66 +1,40 @@
-import cors from "cors";
-import express from "express";
-import helmet from "helmet";
 import { company, COMPANY_SIZES, COUNTRIES } from "./company";
+import type { Product, ProductProfile, ProductStatus, StatementQueue } from "./contracts";
 import { inboxNeedsYou, inboxWaiting, products, resolveInfoFor } from "./data";
 import { statements } from "./statements";
 import { getCurrentUser, loginUser, parseAppId } from "./users";
-import type { Product, ProductStatus, StatementQueue } from "./contracts";
 
-const PORT = parsePort(process.env.PORT);
-const ALLOWED_ORIGINS = allowedOrigins();
 const PRODUCT_STATUSES = new Set<ProductStatus>(["blocked", "waiting", "incomplete", "ready"]);
 const STATEMENT_QUEUES = new Set<StatementQueue>(["blocked", "ready", "submitted"]);
 
-const app = express();
-app.disable("x-powered-by");
-app.use(helmet());
-app.use(
-  cors({
-    origin(origin, callback) {
-      if (!origin || ALLOWED_ORIGINS.has(origin)) {
-        callback(null, true);
-        return;
-      }
-      callback(null, false);
-    },
-    methods: ["GET", "POST", "PATCH"],
-  }),
-);
-app.use(express.json({ limit: "32kb" }));
+export class HttpError extends Error {
+  readonly status: number;
 
-app.get("/api/health", (_req, res) => {
-  res.json({ ok: true });
-});
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
 
-app.get("/api/session", (_req, res) => {
+export function getSession() {
   const user = getCurrentUser();
-  if (!user) {
-    res.status(401).json({ error: "Not logged in" });
-    return;
-  }
-  res.json(user);
-});
+  if (!user) throw new HttpError(401, "Not logged in");
+  return user;
+}
 
-app.get("/api/session/:appId", (req, res) => {
-  const appId = parseAppId(req.params.appId);
-  if (!appId) {
-    res.status(400).json({ error: "Invalid app id" });
-    return;
-  }
-  const user = loginUser(appId);
-  if (!user) {
-    res.status(404).json({ error: "Unknown user" });
-    return;
-  }
-  res.json(user);
-});
+export function loginSession(appId: string) {
+  const id = parseAppId(appId);
+  if (!id) throw new HttpError(400, "Invalid app id");
+  const user = loginUser(id);
+  if (!user) throw new HttpError(404, "Unknown user");
+  return user;
+}
 
-app.get("/api/profile", (_req, res) => {
+export function getProfile(): ProductProfile {
   const blocked = products.filter((product) => product.status === "blocked");
   const readyCount = products.filter((product) => product.status === "ready").length;
   const completeProfiles = 18;
-  res.json({
+  return {
     banner: {
       tone: blocked.length > 0 ? "bad" : "ok",
       pill: blocked.length > 0 ? "Blocked" : "Ready",
@@ -105,37 +79,25 @@ app.get("/api/profile", (_req, res) => {
     needsYou: inboxNeedsYou,
     waitingOnOthers: inboxWaiting,
     blockedProducts: blocked,
-  });
-});
+  };
+}
 
-app.get("/api/products", (req, res) => {
-  const query = parseSearch(req.query.q);
-  const status = parseProductStatus(req.query.status);
-  const pageSize = parsePageSize(req.query.pageSize);
+export function getProducts(params: { page: number; pageSize: number; status: string; q: string }) {
+  const query = parseSearch(params.q);
+  const status = parseProductStatus(params.status);
+  const pageSize = parsePageSize(params.pageSize);
   const filtered = products.filter((product) => {
     const statusOk = status === "all" || product.status === status;
     const haystack = `${product.name} ${product.hint} ${product.why}`.toLowerCase();
     return statusOk && (!query || haystack.includes(query));
   });
-  res.json(paginate(filtered, req.query.page, pageSize));
-});
+  return paginate(filtered, params.page, pageSize);
+}
 
-app.get("/api/products/:id/resolve", (req, res) => {
-  const product = products.find((item) => item.id === req.params.id);
-  if (!product) {
-    res.status(404).json({ error: "Product not found" });
-    return;
-  }
-  res.json(resolveInfoFor(product));
-});
-
-app.post("/api/products", (req, res) => {
-  const name = parseName(req.body?.name);
-  const origin = parseOrigin(req.body?.origin);
-  if (!name) {
-    res.status(400).json({ error: "A product name is required" });
-    return;
-  }
+export function createProduct(input: { name: string; origin: string }) {
+  const name = parseName(input.name);
+  const origin = parseOrigin(input.origin);
+  if (!name) throw new HttpError(400, "A product name is required");
   const product: Product = {
     id: `prod-${Date.now()}`,
     name,
@@ -147,41 +109,47 @@ app.post("/api/products", (req, res) => {
     origin: origin || undefined,
   };
   products.unshift(product);
-  res.status(201).json(product);
-});
+  return product;
+}
 
-app.post("/api/products/:id/nudge", (req, res) => {
-  const product = products.find((item) => item.id === req.params.id);
-  if (!product) {
-    res.status(404).json({ error: "Product not found" });
-    return;
-  }
-  res.json({ ok: true, message: `Reminder sent for ${product.name}` });
-});
+export function nudgeProduct(id: string) {
+  const product = products.find((item) => item.id === id);
+  if (!product) throw new HttpError(404, "Product not found");
+  return { ok: true, message: `Reminder sent for ${product.name}` };
+}
 
-app.get("/api/company", (_req, res) => {
-  res.json({
-    ...company,
-    countries: COUNTRIES,
-    sizes: COMPANY_SIZES,
-  });
-});
+export function getResolveInfo(id: string) {
+  const product = products.find((item) => item.id === id);
+  if (!product) throw new HttpError(404, "Product not found");
+  return resolveInfoFor(product);
+}
 
-app.patch("/api/company", (req, res) => {
-  const nextName = parseName(req.body?.companyName);
-  const vatNumber = parseOrigin(req.body?.vatNumber);
-  const country = parseOrigin(req.body?.country);
-  const size = parseOrigin(req.body?.size);
-  const address = parseName(req.body?.address);
-  const city = parseName(req.body?.city);
-  const contactName = parseName(req.body?.contact?.name);
-  const contactRole = parseOrigin(req.body?.contact?.role);
-  const email = parseEmail(req.body?.contact?.email);
-  const phone = parseOrigin(req.body?.contact?.phone);
+export function getCompany() {
+  return { ...company, countries: COUNTRIES, sizes: COMPANY_SIZES };
+}
+
+export function updateCompany(input: {
+  companyName: string;
+  vatNumber: string;
+  country: string;
+  size: string;
+  address: string;
+  city: string;
+  contact: { name: string; role: string; email: string; phone: string };
+}) {
+  const nextName = parseName(input.companyName);
+  const vatNumber = parseOrigin(input.vatNumber);
+  const country = parseOrigin(input.country);
+  const size = parseOrigin(input.size);
+  const address = parseName(input.address);
+  const city = parseName(input.city);
+  const contactName = parseName(input.contact?.name);
+  const contactRole = parseOrigin(input.contact?.role);
+  const email = parseEmail(input.contact?.email);
+  const phone = parseOrigin(input.contact?.phone);
 
   if (!nextName || !email) {
-    res.status(400).json({ error: "Company name and a valid email are required" });
-    return;
+    throw new HttpError(400, "Company name and a valid email are required");
   }
 
   company.companyName = nextName;
@@ -197,25 +165,32 @@ app.patch("/api/company", (req, res) => {
     phone: phone || company.contact.phone,
   };
   company.updatedAt = "today";
-  res.json({ ...company, countries: COUNTRIES, sizes: COMPANY_SIZES });
-});
+  return getCompany();
+}
 
-app.post("/api/company/eori", (req, res) => {
-  const eori = parseEori(req.body?.eori);
-  const reason = parseName(req.body?.reason);
-  if (!eori || !reason) {
-    res.status(400).json({ error: "A new EORI and a reason are required" });
-    return;
-  }
+export function changeEori(input: { eori: string; reason: string }) {
+  const eori = parseEori(input.eori);
+  const reason = parseName(input.reason);
+  if (!eori || !reason) throw new HttpError(400, "A new EORI and a reason are required");
   company.updatedAt = "today";
-  res.json({ ...company, countries: COUNTRIES, sizes: COMPANY_SIZES });
-});
+  return getCompany();
+}
 
-app.get("/api/statements", (req, res) => {
-  const pageSize = parsePageSize(req.query.pageSize);
-  const filtered = filterStatements(req.query);
-  const page = paginate(filtered, req.query.page, pageSize);
-  res.json({
+export function getStatements(params: {
+  page: number;
+  pageSize: number;
+  q: string;
+  queue: string;
+  supplier: string;
+  product: string;
+  ref: string;
+  sku: string;
+  role: string;
+}) {
+  const pageSize = parsePageSize(params.pageSize);
+  const filtered = filterStatements(params);
+  const page = paginate(filtered, params.page, pageSize);
+  return {
     ...page,
     counts: {
       all: statements.length,
@@ -230,61 +205,42 @@ app.get("/api/statements", (req, res) => {
     },
     readyInView: filtered.filter((row) => row.queue === "ready" && !row.locked).length,
     blockedInView: filtered.filter((row) => row.queue === "blocked").length,
-  });
-});
+  };
+}
 
-app.post("/api/statements/:id/submit", (req, res) => {
-  const row = statements.find((item) => item.id === req.params.id);
-  if (!row) {
-    res.status(404).json({ error: "Statement not found" });
-    return;
-  }
+export function submitStatement(id: string) {
+  const row = statements.find((item) => item.id === id);
+  if (!row) throw new HttpError(404, "Statement not found");
   if (row.queue !== "ready" || row.locked) {
-    res.status(409).json({ error: "This statement cannot be submitted" });
-    return;
+    throw new HttpError(409, "This statement cannot be submitted");
   }
   row.queue = "submitted";
   row.progress = "100%";
   row.created = "today";
   row.validity = "today + 12 months";
   row.why = "Filed today · valid 12 months";
-  res.json(row);
-});
-
-app.post("/api/statements/generate", (req, res) => {
-  const ids = Array.isArray(req.body?.ids)
-    ? req.body.ids.filter((id: unknown) => typeof id === "string")
-    : [];
-  const pool = ids.length
-    ? statements.filter((row) => ids.includes(row.id))
-    : filterStatements(req.body ?? {});
-  const generated = pool.filter((row) => row.queue === "ready" && !row.locked);
-  if (generated.length === 0) {
-    res.status(400).json({ error: "Nothing Ready to generate" });
-    return;
-  }
-  res.json({
-    ok: true,
-    generated: generated.map((row) => ({ id: row.id, name: row.name, supplier: row.supplier })),
-  });
-});
-
-app.use((_req, res) => {
-  res.status(404).json({ error: "Not found" });
-});
-
-app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  console.error(err);
-  res.status(500).json({ error: "Internal server error" });
-});
-
-if (!process.env.VERCEL) {
-  app.listen(PORT, () => {
-    console.log(`Mock API listening on http://localhost:${PORT}`);
-  });
+  return row;
 }
 
-export default app;
+export function generateStatements(input: {
+  ids?: string[];
+  q?: string;
+  queue?: string;
+  supplier?: string;
+  product?: string;
+  ref?: string;
+  sku?: string;
+  role?: string;
+}) {
+  const ids = Array.isArray(input.ids) ? input.ids.filter((id) => typeof id === "string") : [];
+  const pool = ids.length ? statements.filter((row) => ids.includes(row.id)) : filterStatements(input);
+  const generated = pool.filter((row) => row.queue === "ready" && !row.locked);
+  if (generated.length === 0) throw new HttpError(400, "Nothing Ready to generate");
+  return {
+    ok: true,
+    generated: generated.map((row) => ({ id: row.id, name: row.name, supplier: row.supplier })),
+  };
+}
 
 function paginate<T>(items: T[], pageValue: unknown, pageSize: number) {
   const total = items.length;
@@ -319,14 +275,6 @@ function filterStatements(params: Record<string, unknown>) {
       (!role || row.role.toLowerCase() === role)
     );
   });
-}
-
-function parsePort(value: string | undefined): number {
-  const port = Number.parseInt(value ?? "4000", 10);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    throw new Error("PORT must be an integer between 1 and 65535");
-  }
-  return port;
 }
 
 function parsePage(value: unknown): number {
@@ -374,19 +322,4 @@ function parseEmail(value: unknown): string {
 function parseEori(value: unknown): string {
   if (typeof value !== "string") return "";
   return value.replace(/[^a-zA-Z0-9]/g, "").slice(0, 20);
-}
-
-function allowedOrigins() {
-  const origins = new Set(
-    (process.env.CLIENT_ORIGIN ?? "http://localhost:5173,http://127.0.0.1:5173")
-      .split(",")
-      .map((origin) => origin.trim())
-      .filter(Boolean),
-  );
-  if (process.env.VERCEL_URL) origins.add(`https://${process.env.VERCEL_URL}`);
-  const production = process.env.VERCEL_PROJECT_PRODUCTION_URL;
-  if (production) {
-    origins.add(production.startsWith("http") ? production : `https://${production}`);
-  }
-  return origins;
 }

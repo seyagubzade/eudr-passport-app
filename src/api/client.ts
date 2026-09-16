@@ -8,6 +8,7 @@ import type {
   StatementPage,
 } from "../types/api";
 import { apiList } from "./apiList";
+import { localMock } from "./localMock";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -33,7 +34,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export const api = {
+export const remoteApi = {
   getSession: () => request<Session>(apiList.session),
   loginSession: (appId: string) => request<Session>(apiList.sessionByAppId(appId)),
   getProfile: () => request<ProductProfile>(apiList.profile),
@@ -84,3 +85,5 @@ export const api = {
       { method: "POST", body: JSON.stringify(input) },
     ),
 };
+
+export const api = import.meta.env.PROD ? localMock : remoteApi;
